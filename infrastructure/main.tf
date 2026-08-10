@@ -55,6 +55,17 @@ module "eks" {
 
   enable_irsa = true
 
+  node_security_group_additional_rules = {
+    ingress_nodeport_from_lb = {
+      description = "Allow load balancer / health checks to reach NodePort range"
+      protocol    = "tcp"
+      from_port   = 30000
+      to_port     = 32767
+      type        = "ingress"
+      cidr_blocks = ["0.0.0.0/0"]
+    }
+  }
+
   addons = {
     vpc-cni = {
       before_compute = true
