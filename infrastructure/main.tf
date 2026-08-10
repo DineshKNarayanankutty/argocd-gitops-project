@@ -37,7 +37,7 @@ module "vpc" {
 
 module "eks" {
   source  = "terraform-aws-modules/eks/aws"
-  version = "~> 21.0"
+  version = "~> 21.24"
 
   name               = var.cluster_name
   kubernetes_version = var.kubernetes_version
@@ -49,16 +49,30 @@ module "eks" {
   endpoint_public_access  = true
 
   endpoint_public_access_cidrs = [
-    "160.22.44.78/32"
+    "0.0.0.0/0"
   ]
   enable_cluster_creator_admin_permissions = true
 
   enable_irsa = true
 
+  addons = {
+    vpc-cni = {
+      before_compute = true
+    }
+    eks-pod-identity-agent = {
+      before_compute = true
+    }
+    kube-proxy = {}
+    coredns    = {}
+  }
+
   eks_managed_node_groups = {
     argocd_nodes = {
       name = "argocd-nodes"
 
+      # Explicit so the node group doesn't silently pick up a different
+      # default AMI type on some future module upgrade.
+      ami_type       = "AL2023_x86_64_STANDARD"
       instance_types = ["t3.medium"]
 
       min_size     = 1
