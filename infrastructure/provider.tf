@@ -5,7 +5,7 @@ provider "aws" {
     tags = {
       Project     = "argocd-gitops-project"
       Environment = "dev"
-      ManagedBy   = "Terraform_admin"
+      ManagedBy   = "Terraform-admin"
     }
   }
 }
