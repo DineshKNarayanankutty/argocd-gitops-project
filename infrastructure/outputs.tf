@@ -57,3 +57,8 @@ output "eks_managed_node_groups" {
   description = "EKS managed node group information"
   value       = module.eks.eks_managed_node_groups
 }
+
+output "configure_kubectl" {
+  description = "Run this to update your local kubeconfig"
+  value       = "aws eks update-kubeconfig --region ${var.aws_region} --name ${module.eks.cluster_name}"
+}
