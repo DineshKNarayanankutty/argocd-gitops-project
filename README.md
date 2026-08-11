@@ -1,1578 +1,430 @@
-# AWS EKS + Terraform + Argo CD + AWS Load Balancer Controller
+# Deploying the ArgoCD GitOps Project on Amazon EKS
 
-## Repeatable GitOps Project Runbook
+**Follow these steps in exact order. Do not skip a verification check — each one exists because skipping it is exactly where this deployment has failed before.**
 
-**Purpose:** Recreate the complete project from a fresh AWS account whenever required.
+This guide assumes the project's Terraform, Kubernetes, and Helm configuration already exists in the GitHub repository. You are not writing any new code here — you are cloning it and running it.
 
-**AWS Region:** `ap-south-1`
+| | |
+|---|---|
+| **Repository** | `https://github.com/dkn/argocd-gitops-project.git` |
+| **AWS Region** | `ap-south-1` |
+| **EKS Cluster Name** | `argocd-cluster` |
+| **ArgoCD Namespace** | `argocd` |
+| **Application Namespace** | `dkn-argocd-ns` |
+| **Estimated total time** | 45–70 minutes (most of it is waiting for AWS, not typing) |
 
-**EKS Cluster:** `argocd-cluster`
-
-**Argo CD Namespace:** `argocd`
-
-**Application Namespace:** `dkn-argocd-ns`
-
-**GitHub Repository:** `https://github.com/DineshKNarayanankutty/argocd-gitops-project.git`
-
----
-
-# 1. Final Architecture
-
-The completed project follows this architecture:
-
-GitHub
-→ Terraform
-→ AWS VPC
-→ EKS
-→ Kubernetes
-
-GitHub
-→ Argo CD
-→ Kubernetes Application
-
-Kubernetes Ingress
-→ AWS Load Balancer Controller
-→ AWS Application Load Balancer
-→ Nginx Pods
-
-AWS Load Balancer Controller
-→ Kubernetes ServiceAccount
-→ OIDC / IRSA
-→ IAM Role
-→ AWS APIs
-
-The responsibilities are intentionally separated:
-
-* **Terraform:** AWS infrastructure
-* **Helm:** Install AWS Load Balancer Controller
-* **Argo CD:** GitOps application deployment
-* **GitHub:** Source of truth
-* **Kubernetes:** Runs the application
-* **AWS ALB:** Exposes the application externally
+Copy every command exactly as written. Anywhere you see `<LIKE_THIS>`, replace it — including the angle brackets — with the real value, which you'll get from an earlier step's output.
 
 ---
 
-# 2. Prerequisites
+## Before You Start: Verify Your Tools
 
-Before starting, confirm the following tools are installed:
+Run each of these. Every one must print a version number with no error.
 
-* AWS CLI
-* Terraform
-* kubectl
-* Helm
-* Git
-* Docker
-* GitHub account
-* AWS account
+```bash
+aws --version
+terraform --version
+kubectl version --client
+helm version
+git --version
+```
 
-Verify:
-
-`aws --version`
-
-`terraform --version`
-
-`kubectl version --client`
-
-`helm version`
-
-`git --version`
-
-`docker --version`
+> **If any command says "command not found"**: stop here and install that tool before continuing. Don't try to work around a missing tool — every step after this assumes all five are present.
 
 ---
 
-# 3. Configure AWS CLI
+## Step 1 — Configure AWS Access
 
-Configure your AWS credentials using your normal AWS authentication method.
+```bash
+aws configure
+```
 
-Verify the identity:
+Enter your AWS Access Key ID, Secret Access Key, and set the default region to `ap-south-1` when prompted.
 
-`aws sts get-caller-identity`
+Confirm it worked:
 
-Verify the region:
+```bash
+aws sts get-caller-identity
+```
 
-`aws configure get region`
+**Expected result:** a JSON block with your `Account`, `UserId`, and `Arn`. If this errors out, your credentials are wrong or missing — fix that before continuing, nothing else in this guide will work otherwise.
 
-Set the region if necessary:
+```bash
+aws configure get region
+```
 
-`aws configure set region ap-south-1`
+**Expected result:** `ap-south-1`. If it prints nothing or something else, run:
 
-Verify again:
+```bash
+aws configure set region ap-south-1
+```
 
-`aws configure get region`
-
-Expected region:
-
-`ap-south-1`
-
-Do not put AWS access keys or secrets inside Terraform files or GitHub.
-
----
-
-# 4. Create the GitHub Repository
-
-Create one GitHub repository for the complete project.
-
-Recommended repository:
-
-`argocd-gitops-project`
-
-The repository should contain two logical sections:
-
-`infrastructure/`
-
-and
-
-`gitops/`
-
-Final structure:
-
-`argocd-gitops-project/`
-
-→ `infrastructure/`
-
-→ `gitops/`
-
-The infrastructure section contains Terraform.
-
-The GitOps section contains Kubernetes and Argo CD manifests.
-
-For this learning project, one repository is sufficient.
+> ⚠️ **Never** put AWS keys inside any file in the repository. If you ever do this by accident, rotate the key immediately — don't just delete it from the file, since it's still in your Git history.
 
 ---
 
-# 5. Create the Local Project Directory
+## Step 2 — Clone the Repository
 
-Create the project directory:
+```bash
+git clone https://github.com/dkn/argocd-gitops-project.git
+cd argocd-gitops-project
+```
 
-`mkdir argocd-gitops-project`
+Confirm the layout matches this before continuing:
 
-`cd argocd-gitops-project`
-
-Create the infrastructure directory:
-
-`mkdir infrastructure`
-
-Move into it:
-
-`cd infrastructure`
-
-The infrastructure directory should contain:
-
-* Terraform version/provider configuration
-* AWS provider configuration
-* variables
-* outputs
-* main infrastructure configuration
-* EKS configuration
-* ALB controller IAM configuration
-* Terraform variable values
-* Terraform Git ignore configuration
-
----
-
-# 6. Terraform Infrastructure
-
-The Terraform layer creates the AWS infrastructure required by the project.
-
-The final infrastructure should include:
-
-* VPC
-* Internet Gateway
-* Public subnets
-* Private subnets
-* Route tables
-* NAT Gateway
-* Elastic IP
-* EKS cluster
-* EKS managed node group
-* EKS IAM roles
-* EKS security groups
-* EKS KMS encryption
-* EKS managed add-ons
-* OIDC provider
-* IAM role for AWS Load Balancer Controller
-
----
-
-# 7. VPC Design
-
-Use:
-
-**VPC CIDR**
-
-`10.0.0.0/16`
-
-Use two Availability Zones:
-
-* `ap-south-1a`
-* `ap-south-1b`
-
-Use two public subnets:
-
-* `10.0.101.0/24`
-* `10.0.102.0/24`
-
-Use two private subnets:
-
-* `10.0.1.0/24`
-* `10.0.2.0/24`
-
-Architecture:
-
-VPC `10.0.0.0/16`
-
-→ AZ `ap-south-1a`
-
-→ Public subnet `10.0.101.0/24`
-
-→ Private subnet `10.0.1.0/24`
-
-→ AZ `ap-south-1b`
-
-→ Public subnet `10.0.102.0/24`
-
-→ Private subnet `10.0.2.0/24`
-
-EKS worker nodes run in the private subnets.
-
----
-
-# 8. NAT Gateway
-
-Use one NAT Gateway for this learning project.
-
-Purpose:
-
-Private EKS nodes need outbound internet access for operations such as pulling container images.
-
-Traffic path:
-
-Private subnet
-
-→ NAT Gateway
-
-→ Internet Gateway
-
-→ Internet
-
-One NAT Gateway keeps the project cheaper.
-
-For a production multi-AZ architecture, separate NAT Gateways per AZ may be preferred.
-
----
-
-# 9. EKS Configuration
-
-Use:
-
-**Cluster name**
-
-`argocd-cluster`
-
-**Kubernetes version**
-
-`1.35`
-
-**Region**
-
-`ap-south-1`
-
-Use managed node groups.
-
-Node group:
-
-`argocd_nodes`
-
-Instance type:
-
-`t3.medium`
-
-Desired nodes:
-
-`2`
-
-Minimum:
-
-`1`
-
-Maximum:
-
-`2`
-
-Worker nodes should use:
-
-`AL2023_x86_64_STANDARD`
-
-Worker nodes should be deployed into the private subnets.
-
----
-
-# 10. EKS API Access
-
-Enable both:
-
-* Private endpoint access
-* Public endpoint access
-
-For public access, restrict the allowed CIDR to your own public IP.
-
-Find your current public IP:
-
-`(Invoke-RestMethod https://checkip.amazonaws.com).Trim()`
-
-Use your public IP with `/32`.
-
-Example concept:
-
-`YOUR_PUBLIC_IP/32`
-
-Do not use `0.0.0.0/0` for the EKS API unless you intentionally need unrestricted public API access.
-
-Important: if your home/office public IP changes, update the Terraform configuration before attempting to access the EKS API.
-
----
-
-# 11. EKS Managed Add-ons
-
-The EKS configuration must explicitly manage these add-ons:
-
-* VPC CNI
-* kube-proxy
-* CoreDNS
-* EKS Pod Identity Agent
-
-The VPC CNI should be configured to be installed before compute/node creation.
-
-This ensures the cluster networking components are available as the worker nodes are brought online.
-
-The EKS cluster should not be considered ready until:
-
-`kubectl get nodes`
-
-shows all expected nodes as:
-
-`Ready`
-
----
-
-# 12. EKS Encryption
-
-Enable EKS secrets encryption using KMS.
-
-The project should create a KMS key for EKS secrets.
-
-Enable key rotation.
-
-This gives the project an additional security feature suitable for demonstrating production-oriented EKS infrastructure.
-
----
-
-# 13. Initialize Terraform
-
-From the infrastructure directory:
-
-`terraform init`
-
-If you have modified modules or providers and need to refresh them:
-
-`terraform init -upgrade`
-
-Then format:
-
-`terraform fmt`
-
-Validate:
-
-`terraform validate`
-
----
-
-# 14. Review Terraform Plan
-
-Run:
-
-`terraform plan`
-
-Before applying, verify that:
-
-* The correct AWS region is shown.
-* The correct EKS cluster name is shown.
-* The correct Kubernetes version is shown.
-* Two Availability Zones are used.
-* Private and public subnets are created.
-* NAT Gateway is present.
-* EKS managed node group is present.
-* AL2023 worker nodes are selected.
-* EKS add-ons are present.
-* KMS encryption is present.
-* OIDC is enabled.
-* ALB controller IAM resources are present.
-
-Only continue when the plan looks correct.
-
----
-
-# 15. Apply Terraform
-
-Run:
-
-`terraform apply`
-
-Review the plan.
-
-Confirm with:
-
-`yes`
-
-Wait until Terraform completes.
-
-Do not interrupt the operation while the EKS control plane or managed node group is being created.
-
----
-
-# 16. Verify Terraform Outputs
-
-After successful completion:
-
-`terraform output`
-
-At minimum, record:
-
-* EKS cluster name
-* EKS endpoint
-* VPC ID
-* private subnet IDs
-* public subnet IDs
-* AWS Load Balancer Controller IAM role ARN
-
-You will need the VPC ID and Load Balancer Controller role ARN during the next stages.
-
----
-
-# 17. Configure kubectl
-
-Connect your local kubectl configuration to EKS:
-
-`aws eks update-kubeconfig --region ap-south-1 --name argocd-cluster`
-
-Verify:
-
-`kubectl get nodes`
-
-Expected result:
-
-Two worker nodes should be `Ready`.
-
-Then:
-
-`kubectl get pods -A`
-
-Check that the Kubernetes system components are running.
-
----
-
-# 18. Verify EKS Add-ons
-
-Check:
-
-`aws eks list-addons --cluster-name argocd-cluster --region ap-south-1`
-
-Verify the expected add-ons are present.
-
-Then:
-
-`kubectl get pods -n kube-system`
-
-Confirm the important networking components are healthy.
-
-The EKS layer is considered complete when:
-
-* Cluster is ACTIVE
-* Nodes are Ready
-* CoreDNS is Running
-* VPC CNI is Running
-* kube-proxy is Running
-
----
-
-# 19. Install Argo CD
-
-Use the conventional Argo CD namespace:
-
-`argocd`
-
-Create it:
-
-`kubectl create namespace argocd`
-
-Install the official Argo CD stable manifest using server-side apply:
-
-`kubectl apply -n argocd --server-side --force-conflicts -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml`
-
-The official documentation recommends the `argocd` namespace, and current documentation recommends server-side apply because of CRD size limitations.
-
-For a completely reproducible environment, record the Argo CD version used. For example, the Argo CD releases page currently shows v3.4.2 as the latest release; a pinned release URL can be used instead of the moving `stable` URL when exact reproducibility is required.
-
----
-
-# 20. Verify Argo CD
-
-Run:
-
-`kubectl get pods -n argocd`
-
-Wait until the Argo CD components are Running.
-
-Then verify:
-
-`kubectl get svc -n argocd`
-
-Important components include:
-
-* argocd-server
-* argocd-repo-server
-* argocd-application-controller
-* argocd-redis
-* argocd-dex-server
-
----
-
-# 21. Verify Argo CD RBAC
-
-Because we are using the standard `argocd` namespace, the standard Argo CD installation's ClusterRoleBindings will match the ServiceAccounts.
-
-Verify:
-
-`kubectl auth can-i list namespaces --as=system:serviceaccount:argocd:argocd-application-controller`
-
-Expected:
-
-`yes`
-
-This is an important verification step.
-
----
-
-# 22. Access the Argo CD UI
-
-Use port forwarding rather than exposing the Argo CD server publicly for this simple project.
-
-Run:
-
-`kubectl port-forward svc/argocd-server -n argocd 8080:443`
-
-Keep this terminal open.
-
-Open:
-
-`https://localhost:8080`
-
-A browser certificate warning is expected because the initial Argo CD installation uses a self-signed certificate.
-
----
-
-# 23. Retrieve the Initial Argo CD Password
-
-The initial admin password is stored in the Kubernetes Secret:
-
-`argocd-initial-admin-secret`
-
-Retrieve it using kubectl.
-
-Username:
-
-`admin`
-
-Use the retrieved password to log in.
-
-After logging in successfully, remove or rotate the initial credential as appropriate for a longer-lived environment.
-
----
-
-# 24. Prepare the GitOps Directory
-
-Return to the project root.
-
-Create:
-
-`gitops`
-
-Inside it create:
-
-`gitops/k8s`
-
-and:
-
-`gitops/argocd`
-
-The final structure is:
-
-`gitops/`
-
-→ `k8s/`
-
-→ namespace manifest
-
-→ deployment manifest
-
-→ service manifest
-
-→ ingress manifest
-
-→ `argocd/`
-
-→ application manifest
-
----
-
-# 25. Kubernetes Application Namespace
-
-Use:
-
-`dkn-argocd-ns`
-
-This namespace is separate from the Argo CD control-plane namespace.
-
-Argo CD:
-
-`argocd`
-
-Application:
-
-`dkn-argocd-ns`
-
-This separation should be maintained.
-
----
-
-# 26. Kubernetes Application
-
-Deploy a simple Nginx application.
-
-The Deployment should specify:
-
-* Application name: nginx
-* Namespace: dkn-argocd-ns
-* Desired replicas: 2
-* Container image: nginx
-* Container port: 80
-
-The application manifest should be stored in:
-
-`gitops/k8s/`
-
-Do not manually apply the Deployment or Service using kubectl.
-
-Argo CD should deploy them.
-
----
-
-# 27. Kubernetes Service
-
-Use:
-
-`ClusterIP`
-
-Do not expose Nginx directly through a Kubernetes `LoadBalancer` Service.
-
-The final traffic architecture should be:
-
-Internet
-
-→ ALB
-
-→ Nginx Pod IP
-
-The ClusterIP Service remains internal to Kubernetes.
-
----
-
-# 28. Create the Argo CD Application
-
-The Argo CD Application should:
-
-* Live in namespace `argocd`
-* Point to the GitHub repository
-* Use the `main` branch
-* Use the `gitops/k8s` directory
-* Deploy to `dkn-argocd-ns`
-* Use the in-cluster Kubernetes API
-* Enable automated synchronization
-* Enable self-healing
-* Enable pruning
-* Allow namespace creation
-
-The GitHub repository is the desired state.
-
-Argo CD continuously compares Git with the Kubernetes cluster and reconciles differences. This is the core GitOps model.
-
----
-
-# 29. Push GitOps Configuration
-
-From the project root:
-
-`git status`
-
-Add the GitOps files:
-
-`git add gitops/`
-
-Commit:
-
-`git commit -m "Add ArgoCD GitOps application"`
-
-Push:
-
-`git push`
-
----
-
-# 30. Create the Argo CD Application
-
-Apply only the Argo CD Application resource:
-
-`kubectl apply -f gitops/argocd/application.yaml`
-
-Do not manually apply:
-
-* namespace
-* deployment
-* service
-* ingress
-
-Argo CD should create those resources.
-
----
-
-# 31. Verify Argo CD Synchronization
-
-Run:
-
-`kubectl get applications -n argocd`
-
-Expected:
-
-`nginx-demo`
-
-Status should eventually become:
-
-`Synced`
-
-Health should become:
-
-`Healthy`
-
----
-
-# 32. Verify the Application
-
-Run:
-
-`kubectl get all -n dkn-argocd-ns`
-
-Verify:
-
-* Deployment exists
-* Pods exist
-* Pods are Running
-* Service exists
-
-Check pods:
-
-`kubectl get pods -n dkn-argocd-ns`
-
-Check deployment:
-
-`kubectl get deployment -n dkn-argocd-ns`
-
----
-
-# 33. Terraform IAM for AWS Load Balancer Controller
-
-The AWS Load Balancer Controller needs permission to call AWS APIs.
-
-Create the controller IAM role through Terraform.
-
-The IAM role should:
-
-* Use the EKS OIDC provider
-* Use IRSA
-* Attach the AWS Load Balancer Controller IAM policy
-* Trust exactly the Kubernetes ServiceAccount:
-  `kube-system:aws-load-balancer-controller`
-
-The Terraform module used in this project is the AWS IAM module's service-account role functionality.
-
-Run from the infrastructure directory:
-
-`terraform init -upgrade`
-
-Then:
-
-`terraform fmt`
-
-Then:
-
-`terraform validate`
-
-Then:
-
-`terraform plan`
-
-Review the plan.
-
-Apply:
-
-`terraform apply`
-
-Record:
-
-`terraform output load_balancer_controller_role_arn`
-
-Also record:
-
-`terraform output vpc_id`
-
-AWS's current documentation confirms that the controller can use IRSA and that its OIDC trust is specific to the EKS cluster.
-
----
-
-# 34. Install AWS Load Balancer Controller with Helm
-
-Add the AWS EKS Helm repository:
-
-`helm repo add eks https://aws.github.io/eks-charts`
-
-Update it:
-
-`helm repo update eks`
-
-Install the controller into:
-
-`kube-system`
-
-Use:
-
-* Cluster name: `argocd-cluster`
-* Region: `ap-south-1`
-* VPC ID: value from Terraform
-* ServiceAccount: `aws-load-balancer-controller`
-* IAM role ARN: value from Terraform
-* ServiceAccount IAM annotation enabled
-
-For repeatability, pin the Helm chart version used by the project rather than relying on whatever version happens to be latest. AWS's current documentation identifies controller release v2.14.1 and Helm chart 1.14.0.
-
----
-
-# 35. Verify AWS Load Balancer Controller
-
-Run:
-
-`kubectl get deployment -n kube-system aws-load-balancer-controller`
-
-Expected:
-
-`READY 2/2`
-
-Then:
-
-`kubectl get pods -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller`
-
-Both controller Pods should be Running.
-
-Check the ServiceAccount:
-
-`kubectl get serviceaccount aws-load-balancer-controller -n kube-system -o yaml`
-
-Verify that it contains the IAM role annotation.
-
----
-
-# 36. Create the Kubernetes Ingress
-
-The application Ingress should:
-
-* Live in `dkn-argocd-ns`
-* Use the ALB ingress class
-* Use an internet-facing ALB
-* Use IP target mode
-* Listen on HTTP port 80
-* Forward traffic to the Nginx Service on port 80
-
-The important architecture is:
-
-Internet
-
-→ AWS ALB
-
-→ Pod IP
-
-→ Nginx
-
-IP target mode means the ALB sends traffic directly to Pod IPs rather than requiring NodePort routing.
-
-The AWS Load Balancer Controller watches Kubernetes Ingress resources and provisions AWS load balancers accordingly.
-
----
-
-# 37. Push the Ingress Through Git
-
-Add the Ingress manifest to:
-
-`gitops/k8s/`
-
-Commit:
-
-`git add gitops/k8s/`
-
-`git commit -m "Add ALB ingress"`
-
-Push:
-
-`git push`
-
-Do not manually apply the Ingress.
-
-Argo CD should detect the Git change and synchronize it.
-
----
-
-# 38. Verify the Ingress
-
-Run:
-
-`kubectl get ingress -n dkn-argocd-ns`
-
-Initially, the ADDRESS field may be empty.
-
-Watch it:
-
-`kubectl get ingress -n dkn-argocd-ns -w`
-
-Wait until the AWS ALB DNS name appears.
-
-AWS documents that the controller provisions AWS load balancers from Kubernetes Ingress/Service resources.
-
----
-
-# 39. Test the Application
-
-Once the ALB DNS name appears, retrieve it:
-
-`kubectl get ingress -n dkn-argocd-ns`
-
-Copy the ALB hostname.
-
-Open it in a browser.
-
-Expected result:
-
-Nginx welcome page.
-
-At this point the complete path is working:
-
-Internet
-
-→ AWS ALB
-
-→ AWS Load Balancer Controller
-
-→ Nginx Service
-
-→ Nginx Pods
-
----
-
-# 40. Verify the Complete GitOps State
-
-Run:
-
-`kubectl get applications -n argocd`
-
-Expected:
-
-`nginx-demo`
-
-`Synced`
-
-`Healthy`
-
-Then:
-
-`kubectl get pods -n dkn-argocd-ns`
-
-All application Pods should be Running.
-
-Then:
-
-`kubectl get ingress -n dkn-argocd-ns`
-
-The ALB address should be present.
-
----
-
-# 41. GitOps Test 1 — Scale Through Git
-
-Change the Nginx desired replica count in the GitHub Deployment manifest.
-
-For example, change:
-
-2 replicas
-
-to:
-
-3 replicas
-
-Commit:
-
-`git add gitops/k8s/`
-
-`git commit -m "Scale nginx to three replicas"`
-
-`git push`
-
-Watch:
-
-`kubectl get pods -n dkn-argocd-ns -w`
-
-Argo CD should detect the Git change and create the third Pod.
-
-Verify:
-
-`kubectl get deployment nginx -n dkn-argocd-ns`
-
-The deployment should show:
-
-`3/3`
-
-This proves:
-
-GitHub
-
-→ Argo CD
-
-→ Kubernetes
-
----
-
-# 42. GitOps Test 2 — Self-Healing
-
-Make sure Git says:
-
-3 replicas.
-
-Then intentionally change the live Kubernetes state:
-
-Scale the Deployment manually to 1 replica.
-
-Watch:
-
-`kubectl get deployment nginx -n dkn-argocd-ns -w`
-
-Because Argo CD has self-healing enabled, it should detect that:
-
-Git desired state = 3
-
-Kubernetes actual state = 1
-
-Argo CD should reconcile the cluster back to:
-
-3 replicas
-
-This demonstrates Argo CD's self-healing capability.
-
----
-
-# 43. GitOps Test 3 — Pruning
-
-Create a test Kubernetes resource through Git.
-
-Push it.
-
-Confirm Argo CD creates it.
-
-Then remove the resource from Git.
-
-Push again.
-
-Because pruning is enabled, Argo CD should remove the corresponding Kubernetes resource.
-
-This demonstrates:
-
-Git desired state
-
-→ Argo CD
-
-→ Cluster reconciliation
-
-including resource deletion.
-
----
-
-# 44. Final Verification Checklist
-
-The project is complete when all of the following are true.
-
-## AWS
-
-* AWS credentials work
-* Region is `ap-south-1`
-* VPC exists
-* Two AZs exist
-* Public subnets exist
-* Private subnets exist
-* NAT Gateway exists
-* EKS cluster is ACTIVE
-* EKS nodes are Ready
-* KMS encryption exists
-* OIDC provider exists
-* ALB Controller IAM role exists
-
-## Kubernetes
-
-* EKS nodes are Ready
-* CoreDNS is Running
-* VPC CNI is Running
-* kube-proxy is Running
-* Argo CD is Running
-* AWS Load Balancer Controller is Running
-* `dkn-argocd-ns` exists
-* Nginx Pods are Running
-* Nginx Service is ClusterIP
-* Ingress exists
-* ALB address exists
-
-## Argo CD
-
-* Application exists
-* Application is Synced
-* Application is Healthy
-* Automated sync is enabled
-* Self-healing is enabled
-* Pruning is enabled
-
-## GitHub
-
-* Terraform code is pushed
-* Kubernetes manifests are pushed
-* Argo CD Application manifest is pushed
-* Ingress manifest is pushed
-* No AWS credentials/secrets are committed
-
-## Application
-
-* ALB hostname responds
-* Nginx page loads
-* Git replica change is automatically deployed
-* Manual Kubernetes drift is automatically corrected
-
----
-
-# 45. Final Project Structure
-
-The repository should ultimately look like:
-
+```
 argocd-gitops-project/
+├── infrastructure/          ← Terraform (AWS resources)
+│   ├── main.tf
+│   ├── alb-controller.tf
+│   ├── variables.tf
+│   ├── outputs.tf
+│   ├── provider.tf
+│   ├── versions.tf
+│   └── .gitignore
+└── gitops/
+    ├── k8s/                 ← the application (ArgoCD manages this, you don't)
+    │   ├── namespace.yaml
+    │   ├── deployment.yaml
+    │   ├── service.yaml
+    │   └── ingress.yaml
+    └── argocd/
+        └── application.yaml ← the ONLY file in gitops/ you apply manually
+```
 
-→ infrastructure/
+Check it with:
 
-→ Terraform configuration
+```bash
+find . -type f -name "*.tf" -o -type f -name "*.yaml"
+```
 
-→ EKS configuration
-
-→ ALB Controller IAM configuration
-
-→ variables
-
-→ outputs
-
-→ GitOps/
-
-→ k8s/
-
-→ namespace
-
-→ deployment
-
-→ service
-
-→ ingress
-
-→ argocd/
-
-→ application
+> **If files are missing**: you're on the wrong branch, or the repo isn't fully pushed. Run `git branch -a` and `git status` before going any further — don't try to recreate missing files by hand.
 
 ---
 
-# 46. Repeatable Execution Order
+## Step 3 — Provision the AWS Infrastructure
 
-Whenever you rebuild this project, follow this exact order.
+```bash
+cd infrastructure
+terraform init
+```
 
-## Phase 1 — AWS
+**Expected result:** ends with `Terraform has been successfully initialized!`
 
-1. Configure AWS CLI.
-2. Verify AWS identity.
-3. Set `ap-south-1`.
-4. Clone/create GitHub repository.
-5. Enter `infrastructure`.
-6. Run Terraform initialization.
-7. Format Terraform.
-8. Validate Terraform.
-9. Review Terraform plan.
-10. Apply Terraform.
-11. Verify Terraform outputs.
+```bash
+terraform fmt -check
+terraform validate
+```
 
-## Phase 2 — EKS
+**Expected result:** `validate` ends with `Success! The configuration is valid.` If `fmt -check` lists files, that's just a formatting nit — not a blocker, but run `terraform fmt` to clean it up if you want.
 
-12. Update kubeconfig.
-13. Verify EKS nodes.
-14. Verify EKS system Pods.
-15. Verify EKS add-ons.
+```bash
+terraform plan -out=tfplan
+```
 
-## Phase 3 — Argo CD
+Read the output before you go further. Confirm you can see, somewhere in the plan:
 
-16. Create namespace `argocd`.
-17. Install Argo CD.
-18. Wait for all Argo CD Pods.
-19. Verify controller RBAC.
-20. Access Argo CD.
-21. Retrieve initial admin password.
+- [ ] Region `ap-south-1` and cluster name `argocd-cluster`
+- [ ] A VPC with 2 public and 2 private subnets, and a NAT Gateway
+- [ ] An EKS cluster resource and one `aws_eks_node_group`
+- [ ] Four `aws_eks_addon` resources (VPC CNI, kube-proxy, CoreDNS, Pod Identity Agent)
+- [ ] An IAM role for `aws-load-balancer-controller`
 
-## Phase 4 — GitOps
+> **If any of these are missing from the plan**, do not apply. Something in the repo's Terraform files doesn't match this guide's assumptions — stop and check `main.tf` and `alb-controller.tf` before proceeding.
 
-22. Prepare `gitops/k8s`.
-23. Prepare `gitops/argocd`.
-24. Push Kubernetes manifests.
-25. Create Argo CD Application.
-26. Verify `Synced`.
-27. Verify `Healthy`.
-28. Verify Nginx Pods.
+Now apply it:
 
-## Phase 5 — AWS Load Balancer Controller
+```bash
+terraform apply tfplan
+```
 
-29. Add the IAM role through Terraform.
-30. Apply Terraform.
-31. Retrieve IAM role ARN.
-32. Retrieve VPC ID.
-33. Add AWS Helm repository.
-34. Update Helm repository.
-35. Install AWS Load Balancer Controller.
-36. Verify controller Pods.
-37. Verify ServiceAccount IAM annotation.
+**This takes 15–20 minutes.** The EKS control plane alone is typically 10–12 minutes; the node group is another 5–8 minutes on top of that. **Do not close the terminal or press Ctrl+C while this is running.**
 
-## Phase 6 — ALB
+**Expected result:** ends with `Apply complete!` and a list of outputs.
 
-38. Change Nginx Service to ClusterIP.
-39. Add Ingress.
-40. Push changes to Git.
-41. Wait for Argo CD synchronization.
-42. Verify Ingress.
-43. Wait for ALB hostname.
-44. Open ALB URL.
-45. Verify Nginx.
+> ⚠️ **If you see `Error: waiting for EKS Node Group ... unexpected state 'CREATE_FAILED' ... Unhealthy nodes in the kubernetes cluster`:**
+> This means the cluster's networking add-ons (VPC CNI, kube-proxy, CoreDNS) aren't installed, so the worker nodes booted with no pod networking and could never register as `Ready`. Check `main.tf` for an `addons` block on the `module.eks` resource — it must exist, and `vpc-cni` must have `before_compute = true`. If it's missing, this is a bug in the repo's Terraform, not something to work around here — fix `main.tf`, then re-run `terraform apply`.
 
-## Phase 7 — GitOps Validation
+Save the outputs you'll need for later steps:
 
-46. Change replicas in Git.
-47. Push.
-48. Verify Argo CD sync.
-49. Verify new Pods.
-50. Manually create drift.
-51. Verify Argo CD self-healing.
-52. Test pruning.
+```bash
+terraform output
+```
+
+Specifically, note these three values down somewhere (you'll paste them into commands in Steps 4 and 7):
+
+```bash
+terraform output -raw eks_cluster_name
+terraform output -raw vpc_id
+terraform output -raw load_balancer_controller_role_arn
+```
 
 ---
 
-# 47. Important Rules for Repeating the Project
+## Step 4 — Connect kubectl to the Cluster
 
-1. Always use `argocd` for the Argo CD namespace.
+Still inside `infrastructure/`:
 
-2. Always use a separate namespace for the application:
-   `dkn-argocd-ns`
+```bash
+aws eks update-kubeconfig --region ap-south-1 --name argocd-cluster
+```
 
-3. Do not manually deploy application manifests with `kubectl apply`.
+**Expected result:** `Added new context ... to <your kubeconfig path>`
 
-4. Only the Argo CD Application itself may be initially created with kubectl.
+```bash
+kubectl get nodes
+```
 
-5. Keep AWS infrastructure in Terraform.
+**Expected result:** 2 rows, both with `STATUS` = `Ready`. If they show `NotReady`, wait 1–2 minutes and run the command again — this is normal for the first minute or two after node group creation finishes.
 
-6. Keep Kubernetes application configuration in Git.
+> **If nodes stay `NotReady` for more than 5 minutes**, run `kubectl get pods -n kube-system` and check that `aws-node-xxxxx` and `kube-proxy-xxxxx` pods exist and are `Running`. If they don't exist at all, the add-ons from Step 3 didn't actually get installed — go back and check `main.tf`.
 
-7. Keep the AWS Load Balancer Controller IAM role in Terraform.
+```bash
+kubectl get pods -n kube-system
+```
 
-8. Install the AWS Load Balancer Controller with Helm.
+**Expected result:** pods for `aws-node`, `kube-proxy`, and `coredns`, all `Running`.
 
-9. Use IRSA rather than static AWS credentials.
+Return to the repository root before continuing:
 
-10. Use private subnets for EKS worker nodes.
-
-11. Restrict EKS public API access to your own public IP.
-
-12. Do not expose the application using a bare `LoadBalancer` Service when using the ALB Ingress architecture.
-
-13. Use ClusterIP for the Nginx Service.
-
-14. Use Ingress for the public HTTP entry point.
-
-15. Use ALB IP target mode.
-
-16. Never commit AWS credentials, secrets, private keys, or tokens.
-
-17. Run `terraform plan` before every Terraform apply.
-
-18. Run `git diff` and `git status` before pushing changes.
-
-19. Verify Argo CD reports `Synced` and `Healthy` after Git changes.
-
-20. Destroy the AWS infrastructure when the lab is no longer needed to avoid unnecessary charges.
+```bash
+cd ..
+```
 
 ---
 
-# 48. Cleanup After the Lab
+## Step 5 — Install ArgoCD
 
-When you are completely finished and no longer need the project:
+```bash
+kubectl create namespace argocd
+```
 
-First verify you are working in the correct AWS account:
+```bash
+kubectl apply -n argocd --server-side --force-conflicts \
+  -f https://raw.githubusercontent.com/argoproj/argo-cd/stable/manifests/install.yaml
+```
 
-`aws sts get-caller-identity`
+**Expected result:** a long list of `created` / `configured` lines, no errors. `--server-side` is required here — ArgoCD's CRDs are too large for the default client-side apply and it will fail without this flag.
 
-Then go to:
+Wait for everything to come up:
 
-`infrastructure`
+```bash
+kubectl get pods -n argocd -w
+```
 
-Run:
+**Expected result:** every pod eventually shows `1/1` or `2/2` under `READY` and `Running` under `STATUS`. This normally takes 1–2 minutes. Press `Ctrl+C` once they're all `Running`.
 
-`terraform plan`
+You should see, at minimum: `argocd-server`, `argocd-repo-server`, `argocd-application-controller`, `argocd-redis`, `argocd-dex-server`.
 
-Review what will be destroyed.
+Retrieve the initial admin password:
 
-Then:
+```bash
+kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath="{.data.password}" | base64 -d; echo
+```
 
-`terraform destroy`
+**Copy this password somewhere safe** — this command only works until you change or delete the secret.
 
-Confirm with:
+Log in from another terminal (leave this one running):
 
-`yes`
+```bash
+kubectl port-forward svc/argocd-server -n argocd 8080:443
+```
 
-After destruction, verify that the EKS cluster, EC2 instances, NAT Gateway, load balancers, and associated infrastructure have been removed.
+Open `https://localhost:8080` in a browser. Accept the certificate warning (expected — ArgoCD's default cert is self-signed). Username `admin`, password from the previous command.
 
-Also check the AWS Console for any remaining billable resources.
-
-Keep the GitHub repository. It contains the reusable project configuration and can be used to recreate the environment later.
-
----
-
-# 49. What This Project Demonstrates
-
-This single project demonstrates:
-
-* AWS
-* VPC
-* Subnets
-* NAT Gateway
-* EKS
-* Kubernetes
-* Terraform
-* Terraform modules
-* EKS managed node groups
-* EKS add-ons
-* KMS
-* IAM
-* OIDC
-* IRSA
-* Helm
-* AWS Load Balancer Controller
-* ALB
-* Kubernetes Ingress
-* Kubernetes Services
-* Git
-* GitHub
-* Argo CD
-* GitOps
-* Automated synchronization
-* Self-healing
-* Pruning
-* Infrastructure as Code
-* Kubernetes reconciliation
-
-The strongest interview-level summary is:
-
-"I provisioned an EKS-based Kubernetes environment on AWS using Terraform, including VPC networking, private worker nodes, KMS encryption, EKS add-ons, and IAM/OIDC integration. I installed Argo CD for GitOps-based application delivery, with GitHub acting as the source of truth. I then integrated the AWS Load Balancer Controller using IRSA and exposed the application through an AWS Application Load Balancer using Kubernetes Ingress. I validated automated synchronization, self-healing, and pruning by introducing controlled changes through Git and directly in the cluster."
+> **If `kubectl get secret argocd-initial-admin-secret` says "not found"**: ArgoCD auto-deletes this secret once the admin password has been changed once already. If this is a fresh install and it's already missing, something applied the manifests before this run — check `kubectl get pods -n argocd` to confirm ArgoCD is actually healthy, and if so, you likely already have a password set from a previous attempt.
 
 ---
 
-# 50. One-Page Rebuild Sequence
+## Step 6 — Deploy the Application Through ArgoCD
 
-For quick reference:
+This is the **only** manifest you ever apply manually with `kubectl`. Everything else in `gitops/k8s/` is managed by ArgoCD from here on.
 
-AWS CLI configured
+```bash
+kubectl apply -f gitops/argocd/application.yaml
+```
 
-↓
+**Expected result:** `application.argoproj.io/nginx-demo created`
 
-Verify AWS identity
+Watch it sync:
 
-↓
+```bash
+kubectl get applications -n argocd -w
+```
 
-Set `ap-south-1`
+**Expected result:** `SYNC STATUS` moves to `Synced` and `HEALTH STATUS` moves to `Healthy` within about a minute. Press `Ctrl+C` once you see that.
 
-↓
+> **If it stays `OutOfSync` or `Unknown`**, run `kubectl describe application nginx-demo -n argocd` and read the `Conditions` and `Events` at the bottom — this almost always points to a Git connectivity or path problem (wrong branch, wrong path, or the repo being private without credentials configured in ArgoCD).
 
-Clone GitHub repository
+Confirm the application itself is actually running:
 
-↓
+```bash
+kubectl get pods -n dkn-argocd-ns
+kubectl get svc -n dkn-argocd-ns
+```
 
-Enter `infrastructure`
+**Expected result:** 2 `nginx-xxxxx` pods, both `Running`, and one `nginx` service of `TYPE` = `ClusterIP`.
 
-↓
-
-Terraform init
-
-↓
-
-Terraform fmt
-
-↓
-
-Terraform validate
-
-↓
-
-Terraform plan
-
-↓
-
-Terraform apply
-
-↓
-
-Update kubeconfig
-
-↓
-
-Verify EKS nodes
-
-↓
-
-Verify EKS add-ons
-
-↓
-
-Create `argocd` namespace
-
-↓
-
-Install Argo CD
-
-↓
-
-Verify Argo CD Pods
-
-↓
-
-Verify Argo CD RBAC
-
-↓
-
-Access Argo CD
-
-↓
-
-Push Kubernetes manifests to GitHub
-
-↓
-
-Create Argo CD Application
-
-↓
-
-Verify `Synced + Healthy`
-
-↓
-
-Terraform creates ALB Controller IAM role
-
-↓
-
-Terraform apply
-
-↓
-
-Get VPC ID
-
-↓
-
-Get ALB Controller role ARN
-
-↓
-
-Add AWS EKS Helm repository
-
-↓
-
-Install AWS Load Balancer Controller
-
-↓
-
-Verify controller
-
-↓
-
-Service = ClusterIP
-
-↓
-
-Add Ingress
-
-↓
-
-Push to GitHub
-
-↓
-
-Argo CD syncs
-
-↓
-
-AWS ALB is created
-
-↓
-
-Open ALB DNS
-
-↓
-
-Nginx works
-
-↓
-
-Test Git-based scaling
-
-↓
-
-Test Argo CD self-healing
-
-↓
-
-Test pruning
-
-↓
-
-Project complete
+> **If the namespace `dkn-argocd-ns` doesn't exist at all**, check that `syncOptions` in `gitops/argocd/application.yaml` includes `CreateNamespace=true`.
 
 ---
 
-## Official references
+## Step 7 — Install the AWS Load Balancer Controller
 
-Argo CD's current documentation confirms the standard `argocd` namespace and the server-side installation approach.
+```bash
+helm repo add eks https://aws.github.io/eks-charts
+helm repo update eks
+```
 
-[Argo CD documentation](https://argo-cd.readthedocs.io/en/stable/)
+Get the two values you saved in Step 3:
 
-AWS's current documentation recommends Helm for installing the AWS Load Balancer Controller on EKS and documents IRSA/OIDC requirements.
+```bash
+terraform -chdir=infrastructure output -raw vpc_id
+terraform -chdir=infrastructure output -raw load_balancer_controller_role_arn
+```
 
-[AWS Load Balancer Controller documentation](https://docs.aws.amazon.com/eks/latest/userguide/aws-load-balancer-controller.html)
+Now install, substituting those two values in:
 
-The current Argo CD releases page can be used when you want to pin an exact Argo CD version for reproducible rebuilds.
+```bash
+helm install aws-load-balancer-controller eks/aws-load-balancer-controller \
+  -n kube-system \
+  --set clusterName=argocd-cluster \
+  --set region=ap-south-1 \
+  --set vpcId=<VPC_ID_FROM_ABOVE> \
+  --set serviceAccount.create=true \
+  --set serviceAccount.name=aws-load-balancer-controller \
+  --set serviceAccount.annotations."eks\.amazonaws\.com/role-arn"=<ROLE_ARN_FROM_ABOVE>
+```
 
-[Argo CD releases](https://github.com/argoproj/argo-cd/releases)
+**Expected result:** ends with `STATUS: deployed`.
+
+```bash
+kubectl get deployment -n kube-system aws-load-balancer-controller
+```
+
+**Expected result:** `READY` column shows `2/2`. If it shows `0/2` or `1/2`, wait 30–60 seconds and check again.
+
+```bash
+kubectl get pods -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller
+```
+
+**Expected result:** 2 pods, both `Running`, `0` restarts.
+
+> ⚠️ **If the pods are stuck in `CrashLoopBackOff`:**
+> ```bash
+> kubectl logs -n kube-system -l app.kubernetes.io/name=aws-load-balancer-controller --tail=50
+> ```
+> This is almost always an IRSA mismatch — the ServiceAccount name/namespace (`kube-system:aws-load-balancer-controller`), the `role-arn` annotation, and the IAM role's trust policy all have to match exactly. Check `alb-controller.tf` for the `namespace_service_accounts` value and compare it character-for-character against what you passed to `helm install` above.
+
+---
+
+## Step 8 — Verify the Application Load Balancer
+
+```bash
+kubectl get ingress -n dkn-argocd-ns -w
+```
+
+**Expected result:** the `ADDRESS` column starts empty and fills in with something like `k8s-dknargoc-nginx-xxxxxxxxxx-xxxxxxxxxx.ap-south-1.elb.amazonaws.com`, usually within 1–3 minutes. Press `Ctrl+C` once it appears.
+
+```bash
+kubectl get ingress -n dkn-argocd-ns
+```
+
+Copy the `ADDRESS` value. **Wait 2–3 minutes** before testing it in a browser — the ALB needs a short window after this address first appears to finish provisioning and for DNS to propagate. Then open it in a browser.
+
+**Expected result:** the Nginx welcome page.
+
+> **If you get `ERR_CONNECTION_TIMED_OUT`:** check the target health of the load balancer in the EC2 console (Load Balancers → find it → Target Groups tab). Targets stuck `unhealthy` almost always mean a security group is blocking traffic — this shouldn't happen with the Terraform in this repo (it already includes a node security group rule for this), but if it does, check `eks_node_security_group_id` from `terraform output` against the EC2 console's Security Groups.
+>
+> **If you get `DNS_PROBE_FINISHED_NXDOMAIN`:** this is almost always just timing — re-check `kubectl get ingress -n dkn-argocd-ns` to confirm the address is still there, wait another couple of minutes, and try again. If it's been more than 5 minutes, run `kubectl describe ingress nginx -n dkn-argocd-ns` and check the `Events` section for an actual error.
+
+---
+
+## Step 9 — Full Verification (run this whole block)
+
+Paste all of these together. If every line matches its "expected" note, the deployment is complete and correct.
+
+```bash
+kubectl get nodes                                    # 2 nodes, Ready
+kubectl get pods -n kube-system                       # aws-node, kube-proxy, coredns: Running
+kubectl get pods -n argocd                             # all Running
+kubectl get applications -n argocd                      # nginx-demo: Synced, Healthy
+kubectl get pods -n dkn-argocd-ns                       # 2 nginx pods, Running
+kubectl get svc -n dkn-argocd-ns                        # nginx: ClusterIP
+kubectl get deployment -n kube-system aws-load-balancer-controller   # READY 2/2
+kubectl get ingress -n dkn-argocd-ns                     # ADDRESS is populated
+```
+
+If all eight of those match, **you're done — the deployment is fully working.** Open the ALB address in a browser one more time to see it for yourself.
+
+---
+
+## Optional: Prove the GitOps Loop Actually Works
+
+Do this once, so you've personally seen ArgoCD do its job rather than just trusting it did.
+
+**Test 1 — a Git change reaches the cluster on its own.**
+Edit `gitops/k8s/deployment.yaml` in the repo, change `replicas: 2` to `replicas: 3`, then:
+
+```bash
+git add gitops/k8s/deployment.yaml
+git commit -m "Scale nginx to 3 replicas"
+git push
+kubectl get pods -n dkn-argocd-ns -w
+```
+
+**Expected result:** a third `nginx-xxxxx` pod appears within about a minute, with no `kubectl apply` on your part.
+
+**Test 2 — manual changes to the cluster get reverted.**
+
+```bash
+kubectl scale deployment nginx -n dkn-argocd-ns --replicas=1
+kubectl get deployment nginx -n dkn-argocd-ns -w
+```
+
+**Expected result:** ArgoCD notices the drift (live = 1, Git = 3) and scales it back to 3 on its own within about a minute — this is self-healing.
+
+---
+
+## Cleaning Up
+
+Do these **in this exact order**. Doing it out of order can leave an orphaned load balancer in your AWS account that keeps costing money after `terraform destroy` says it's done.
+
+```bash
+kubectl delete -f gitops/argocd/application.yaml
+```
+
+Wait ~30 seconds, then confirm the app namespace and its Ingress are gone:
+
+```bash
+kubectl get ns dkn-argocd-ns
+```
+
+**Expected result:** `Error from server (NotFound)` — that's correct, it means ArgoCD's pruning deleted everything, including the ALB.
+
+```bash
+helm uninstall aws-load-balancer-controller -n kube-system
+```
+
+Only now, destroy the AWS infrastructure:
+
+```bash
+cd infrastructure
+aws sts get-caller-identity      # double check you're in the right AWS account first
+terraform plan -destroy
+terraform destroy
+```
+
+Type `yes` when prompted. This also takes several minutes.
+
+Finally, check the AWS Console (EC2 → Load Balancers, EKS, VPC) for anything left over. `terraform destroy` should remove everything it created, but it's worth a 30-second look before you close the laptop.
+
+---
+
+## You're Done
+
+If Step 9's checklist passed, this deployment is complete and working exactly as designed:
+
+**Terraform** built the AWS infrastructure → **ArgoCD** deployed the application from Git → the **AWS Load Balancer Controller** exposed it through a real Application Load Balancer → and you've personally confirmed Git changes flow to the cluster automatically.
+
+If something along the way didn't match an "expected result," the note directly under that step is the fix — this guide was written by working through every failure this exact deployment has actually produced, not by guessing what might go wrong.
