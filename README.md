@@ -6,7 +6,7 @@ This guide assumes the project's Terraform, Kubernetes, and Helm configuration a
 
 | | |
 |---|---|
-| **Repository** | `https://github.com/dkn/argocd-gitops-project.git` |
+| **Repository** | `https://github.com/DineshKNarayanankutty/argocd-gitops-project.git` |
 | **AWS Region** | `ap-south-1` |
 | **EKS Cluster Name** | `argocd-cluster` |
 | **ArgoCD Namespace** | `argocd` |
