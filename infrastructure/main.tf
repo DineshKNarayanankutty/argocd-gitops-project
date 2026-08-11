@@ -62,7 +62,7 @@ module "eks" {
       from_port   = 30000
       to_port     = 32767
       type        = "ingress"
-      cidr_blocks = ["0.0.0.0/0"]
+      cidr_blocks = ["0.0.0.0/0"]   #We can use our own IP instead of the entire IPv4 Internet. Use "<Your_IP>/32".
     }
   }
 
