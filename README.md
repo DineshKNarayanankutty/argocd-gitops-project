@@ -81,7 +81,7 @@ argocd-gitops-project/
 │   ├── outputs.tf
 │   ├── provider.tf
 │   ├── versions.tf
-│   └── .gitignore
+│   └── terraform.tfvars
 └── gitops/
     ├── k8s/                 ← the application (ArgoCD manages this, you don't)
     │   ├── namespace.yaml
@@ -390,23 +390,41 @@ kubectl get deployment nginx -n dkn-argocd-ns -w
 
 Do these **in this exact order**. Doing it out of order can leave an orphaned load balancer in your AWS account that keeps costing money after `terraform destroy` says it's done.
 
-```bash
-kubectl delete -f gitops/argocd/application.yaml
-```
+> ⚠️ **Important misconception to avoid:** deleting the ArgoCD `Application` object (`kubectl delete -f gitops/argocd/application.yaml`) does **not** delete the resources it manages. `prune: true` only prunes resources that are *removed from Git while the Application keeps syncing* — that's drift-correction, not a delete-cascade. Deleting the Application itself only cascades to its child resources if it carries a specific finalizer (`resources-finalizer.argocd.argoproj.io`), which this project's Application manifest does not set. Deleting it just removes ArgoCD's tracking object — the Deployment, Service, Ingress, and ALB are left running, untouched. Don't rely on it for cleanup; delete the namespace directly, as below, **before** touching the Load Balancer Controller.
 
-Wait ~30 seconds, then confirm the app namespace and its Ingress are gone:
+**1. Delete the application's namespace — while the AWS Load Balancer Controller is still installed:**
 
 ```bash
-kubectl get ns dkn-argocd-ns
+kubectl delete ns dkn-argocd-ns
+kubectl get ns dkn-argocd-ns -w
 ```
 
-**Expected result:** `Error from server (NotFound)` — that's correct, it means ArgoCD's pruning deleted everything, including the ALB.
+Deleting the namespace deletes the Deployment, Service, and Ingress together. Deleting the Ingress while the controller is still running is what actually triggers it to tear down the ALB, target group, listener, and security group rules it created — that's the point of doing this step first. Wait for the namespace to fully disappear (usually 1–2 minutes).
+
+> ⚠️ **Do not uninstall the AWS Load Balancer Controller before this step.** Without it running, the Ingress's finalizer has nothing to release it — attempting to delete it will hang in `Terminating` forever, and the ALB in AWS becomes orphaned (and keeps billing you) until you delete it by hand in the console.
+
+**2. Confirm the ALB is actually gone in AWS, not just the Kubernetes object:**
+
+```bash
+aws elbv2 describe-load-balancers --region ap-south-1 \
+  --query "LoadBalancers[?contains(LoadBalancerName,'dknargoc')]"
+```
+
+**Expected result:** `[]`
+
+**3. Clean up the ArgoCD Application record:**
+
+```bash
+kubectl delete application nginx-demo -n argocd --ignore-not-found
+```
+
+**4. Now it's safe to uninstall the controller:**
 
 ```bash
 helm uninstall aws-load-balancer-controller -n kube-system
 ```
 
-Only now, destroy the AWS infrastructure:
+**5. Only now, destroy the AWS infrastructure:**
 
 ```bash
 cd infrastructure
